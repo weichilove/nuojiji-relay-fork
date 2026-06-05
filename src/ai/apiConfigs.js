@@ -17,12 +17,18 @@ export const API_CONFIGS = {
         name: 'OpenAI',
         defaultModel: 'gpt-3.5-turbo',
         extractContent: (data) => data.choices?.[0]?.message?.content ?? null,
+        extractStreamDelta: (data) => data.choices?.[0]?.delta?.content ?? null,
     },
     [API_TYPES.GEMINI]: {
         name: 'Google Gemini',
         defaultModel: 'gemini-pro',
         extractContent: (data) => {
             if (data.choices?.[0]?.message?.content) return data.choices[0].message.content;
+            if (data.candidates?.[0]?.content?.parts?.[0]?.text) return data.candidates[0].content.parts[0].text;
+            return null;
+        },
+        extractStreamDelta: (data) => {
+            if (data.choices?.[0]?.delta?.content) return data.choices[0].delta.content;
             if (data.candidates?.[0]?.content?.parts?.[0]?.text) return data.candidates[0].content.parts[0].text;
             return null;
         },
@@ -35,6 +41,11 @@ export const API_CONFIGS = {
             if (data.content?.[0]?.text) return data.content[0].text;
             return null;
         },
+        extractStreamDelta: (data) => {
+            if (data.choices?.[0]?.delta?.content) return data.choices[0].delta.content;
+            if (data.delta?.text) return data.delta.text;
+            return null;
+        },
     },
     [API_TYPES.CUSTOM]: {
         name: '自定义API',
@@ -44,6 +55,12 @@ export const API_CONFIGS = {
             if (data.content?.[0]?.text) return data.content[0].text;
             if (data.text) return data.text;
             if (typeof data === 'string') return data;
+            return null;
+        },
+        extractStreamDelta: (data) => {
+            if (data.choices?.[0]?.delta?.content) return data.choices[0].delta.content;
+            if (data.delta?.content) return data.delta.content;
+            if (data.content) return data.content;
             return null;
         },
     },

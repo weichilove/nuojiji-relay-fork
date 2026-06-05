@@ -10,8 +10,11 @@ async function callOnce({ apiUrl, apiKey, model, apiType, messages, temperature,
     assertSafeApiUrl(apiUrl);
     const endpoint = buildChatEndpoint(apiUrl);
     const headers = buildApiHeaders(apiUrl, apiKey);
+    // ⚠️ 用流式调 AI（stream:true）：部分 AI 代理（如 gemini 反代）对「非流式 + 图片」会 500，
+    //    流式正常。后端在请求内读完整个 SSE 流、把 delta 拼成完整 content 再返回 —— 对手机端
+    //    仍是「整条结果进 outbox」的非流式交付，只是后端内部走流式绕开代理的非流式限制。
     const body = buildChatRequestBody({
-        apiUrl, model, messages, temperature, reasoningEffort, stream: false, maxTokens,
+        apiUrl, model, messages, temperature, reasoningEffort, stream: true, maxTokens,
     });
 
     const controller = new AbortController();
@@ -24,34 +27,63 @@ async function callOnce({ apiUrl, apiKey, model, apiType, messages, temperature,
             body: JSON.stringify(body),
             signal: controller.signal,
         });
+
+        if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            const err = new Error(`AI HTTP ${res.status}: ${errText.slice(0, 500)}`);
+            err.status = res.status;
+            throw err;
+        }
+
+        const config = getApiConfig(apiType);
+        const ct = res.headers.get('content-type') || '';
+
+        // 非 SSE（代理忽略了 stream，直接返回完整 JSON）→ 按非流式解析兜底
+        if (!ct.includes('text/event-stream')) {
+            const rawText = await res.text();
+            let data;
+            try { data = JSON.parse(rawText); } catch { data = rawText; }
+            const content = config.extractContent(data);
+            if (content == null || content === '') {
+                const err = new Error('AI returned empty content (non-stream fallback)');
+                err.status = res.status;
+                err.detail = typeof data === 'string' ? data.slice(0, 300) : JSON.stringify(data).slice(0, 300);
+                throw err;
+            }
+            return content;
+        }
+
+        // SSE 流式：逐行读 data:，累积 delta
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let content = '';
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // 末行可能不完整，留到下次
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || !trimmed.startsWith('data:')) continue;
+                const payload = trimmed.slice(5).trim();
+                if (payload === '[DONE]') continue;
+                let json;
+                try { json = JSON.parse(payload); } catch { continue; }
+                const delta = config.extractStreamDelta(json);
+                if (delta) content += delta;
+            }
+        }
+        if (!content || !content.trim()) {
+            const err = new Error('AI returned empty content (stream)');
+            err.status = res.status;
+            throw err;
+        }
+        return content;
     } finally {
         clearTimeout(timer);
     }
-
-    const rawText = await res.text();
-    if (!res.ok) {
-        const err = new Error(`AI HTTP ${res.status}: ${rawText.slice(0, 500)}`);
-        err.status = res.status;
-        throw err;
-    }
-
-    let data;
-    try {
-        data = JSON.parse(rawText);
-    } catch {
-        // 某些自定义端点直接返回纯文本
-        data = rawText;
-    }
-
-    const config = getApiConfig(apiType);
-    const content = config.extractContent(data);
-    if (content == null || content === '') {
-        const err = new Error('AI returned empty content');
-        err.status = res.status;
-        err.detail = typeof data === 'string' ? data.slice(0, 300) : JSON.stringify(data).slice(0, 300);
-        throw err;
-    }
-    return content;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
